@@ -53,6 +53,8 @@ button.primary{background:var(--mark);border-color:var(--mark);color:var(--mark-
 .field{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
 .field input{font:13px var(--mono);width:108px;padding:6px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--ink)}
 .field input#outName{font:inherit;width:min(300px,60vw)}
+.field select{font:13px var(--sans);padding:6px;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--ink)}
+#mode.convert{color:var(--ink)}
 .sel-len{font:13px var(--mono);font-variant-numeric:tabular-nums}
 #pan{width:100%;margin:0}
 .strip{position:relative;display:flex;gap:3px;height:34px;overflow:hidden;background:var(--bg);border-radius:3px}
@@ -87,7 +89,7 @@ body.dropping section:first-of-type{outline:3px solid var(--mark)}
 <div class="page">
   <header>
     <h1>MP3 剪接器</h1>
-    <span class="note">支援 MP3 與 M4A，不重新編碼，音質不變。檔案只在這台電腦處理。</span>
+    <span class="note">可開 MP3 與 M4A，匯出一律是 MP3。檔案只在這台電腦處理。</span>
     <span class="spacer"></span>
     <button id="open" class="primary">開啟音檔</button>
     <input id="file" type="file" accept=".mp3,.m4a,.m4b,.mp4,audio/mpeg,audio/mp4,audio/x-m4a" multiple hidden>
@@ -135,10 +137,12 @@ body.dropping section:first-of-type{outline:3px solid var(--mark)}
     <p class="note" id="noClips" style="margin:0">還沒有片段。在波形上選好範圍，按「加入選取範圍」。</p>
     <div class="row">
       <span class="field"><label for="outName">檔名</label><input id="outName" spellcheck="false" autocomplete="off"></span>
+      <span class="field" id="kbpsField"><label for="kbps">轉檔音質</label>
+        <select id="kbps"><option value="128">128 kbps</option><option value="192" selected>192 kbps</option><option value="256">256 kbps</option><option value="320">320 kbps</option></select></span>
       <button id="preview" disabled>試聽成品</button>
-      <button id="export" class="primary" disabled>匯出</button>
-      <span class="note">成品格式跟片段相同（MP3 或 M4A），歌曲資訊與封面不會帶過去。</span>
+      <button id="export" class="primary" disabled>匯出 MP3</button>
     </div>
+    <p class="note" id="mode" style="margin:0"></p>
   </section>
 
   <div id="status" role="status" aria-live="polite"></div>
@@ -408,70 +412,15 @@ function parseM4a(b){
     frameDur:durs[0]/ts,dur:total/ts,kbps:Math.round(bytes*8/(total/ts)/1000)};
 }
 
-const be=(a,o,v)=>{a[o]=v>>>24;a[o+1]=(v>>>16)&255;a[o+2]=(v>>>8)&255;a[o+3]=v&255};
-const words=(...vs)=>{const a=new Uint8Array(vs.length*4);vs.forEach((v,i)=>be(a,i*4,v));return a};
-const ascii4=s=>Uint8Array.from(s,c=>c.charCodeAt(0));
-function mp4Box(type,...parts){
-  let n=8; for(const p of parts) n+=p.length;
-  const out=new Uint8Array(n); be(out,0,n); out.set(ascii4(type),4);
-  let o=8; for(const p of parts){out.set(p,o);o+=p.length}
-  return out;
-}
-const MATRIX=words(0x10000,0,0,0,0x10000,0,0,0,0x40000000);
-
-// 把各片段的樣本照順序搬進新的 mdat，再寫一份對應的樣本表。片段開頭用編輯清單略過暖機的那一格。
-function buildM4a(clips){
-  const s0=clips[0].src, ts=s0.timescale;
-  let n=0, data=0, total=0;
-  for(const c of clips) for(let i=c.a;i<c.b;i++){n++;data+=c.src.sizes[i];total+=c.src.durs[i]}
-  const stsz=new Uint8Array(12+4*n); be(stsz,8,n);
-  const runs=[]; let k=0;
-  for(const c of clips) for(let i=c.a;i<c.b;i++,k++){
-    be(stsz,12+4*k,c.src.sizes[i]);
-    const d=c.src.durs[i], r=runs[runs.length-1];
-    if(r&&r[1]===d) r[0]++; else runs.push([1,d]);
-  }
-  let skip=clips[0].a===0?s0.priming:s0.durs[clips[0].a];
-  if(skip>=total) skip=0;
-  const shown=total-skip;
-  const ftyp=mp4Box('ftyp',ascii4('M4A '),words(0x200),ascii4('M4A isomiso2mp41'));
-  const chunkOff=ftyp.length+8;
-  const moov=mp4Box('moov',
-    mp4Box('mvhd',words(0,0,0,ts,shown,0x10000),new Uint8Array([1,0,0,0,0,0,0,0,0,0,0,0]),MATRIX,new Uint8Array(24),words(2)),
-    mp4Box('trak',
-      mp4Box('tkhd',words(3,0,0,1,0,shown,0,0),new Uint8Array([0,0,0,0,1,0,0,0]),MATRIX,words(0,0)),
-      mp4Box('edts',mp4Box('elst',words(0,1,shown,skip,0x10000))),
-      mp4Box('mdia',
-        mp4Box('mdhd',words(0,0,0,ts,total),new Uint8Array([0x55,0xC4,0,0])),
-        mp4Box('hdlr',words(0,0),ascii4('soun'),new Uint8Array(12),ascii4('SoundHandler'),new Uint8Array(1)),
-        mp4Box('minf',
-          mp4Box('smhd',words(0,0)),
-          mp4Box('dinf',mp4Box('dref',words(0,1),mp4Box('url ',words(1)))),
-          mp4Box('stbl',
-            s0.stsd,
-            mp4Box('stts',words(0,runs.length),...runs.map(r=>words(r[0],r[1]))),
-            mp4Box('stsc',words(0,1,1,n,1)),
-            mp4Box('stsz',stsz),
-            mp4Box('stco',words(0,1,chunkOff)))))));
-  const out=new Uint8Array(chunkOff+data+moov.length);
-  out.set(ftyp,0); be(out,ftyp.length,8+data); out.set(ascii4('mdat'),ftyp.length+4);
-  let p=chunkOff;
-  for(const c of clips){
-    const s=c.src;
-    for(let i=c.a;i<c.b;i++){out.set(s.bytes.subarray(s.offs[i],s.offs[i]+s.sizes[i]),p);p+=s.sizes[i]}
-  }
-  out.set(moov,p);
-  return {bytes:out,frames:n};
-}
-
 const parseAudio=b=>b.length>12&&cc(b,4)==='ftyp'?parseM4a(b):parseMp3(b);
-const exportClips=clips=>clips[0].src.kind==='m4a'?buildM4a(clips):buildExport(clips);
+// 全部是同規格的 MP3 才能直接搬音框；其他情況（含 M4A 或規格不同）都要解碼後重新編成 MP3
+const canCopyFrames=clips=>clips.length>0&&clips.every(c=>c.src.kind==='mp3'&&c.src.key===clips[0].src.key);
 /*END CORE*/
 
 const $=id=>document.getElementById(id);
 const el=(tag,props={},...kids)=>{const e=Object.assign(document.createElement(tag),props);e.append(...kids);return e};
 const BIN=64, RULER=22, MIN_SPAN=.25;
-const sources=[]; let cur=null, clips=[], clipSeq=0, nameTouched=false;
+const sources=[]; let cur=null, clips=[], clipSeq=0, nameTouched=false, busy=false;
 
 function fmt(t){
   t=Math.max(0,t);
@@ -505,10 +454,8 @@ function computePeaks(ab){
   }
   return {mins,maxs};
 }
-const extOf=s=>s.kind==='m4a'?'.m4a':'.mp3';
-const defaultName=s=>s.name.replace(/\.(mp3|m4a|m4b|mp4)$/i,'')+'_剪接'+extOf(s);
+const defaultName=s=>s.name.replace(/\.(mp3|m4a|m4b|mp4)$/i,'')+'_剪接.mp3';
 const chLabel=s=>s.channels===1?'單聲道':s.channels===2?'立體聲':s.channels+' 聲道';
-const spec=s=>(s.kind==='m4a'?s.codec+' ':'')+(s.sr/1000)+' kHz '+chLabel(s);
 async function loadFile(file){
   say('正在讀取「'+file.name+'」…');
   const raw=new Uint8Array(await file.arrayBuffer());
@@ -517,6 +464,7 @@ async function loadFile(file){
   try{
     const last=s.n-1;
     const data=s.kind==='mp3'?raw.subarray(s.offs[0],s.offs[last]+s.sizes[last]):raw;
+    s.decodeData=data;
     s.buffer=await decode(data,s.sr,s.channels,s.dur);
   }catch(e){
     say('「'+file.name+'」無法解碼，'+(s.kind==='m4a'?'這個瀏覽器可能不支援它的編碼（'+s.codec+'），或檔案已損毀。':'檔案可能損毀或太大。'),true);
@@ -789,16 +737,7 @@ $('playSel').onclick=togglePlaySel;
 
 /* ---------- 成品清單 ---------- */
 const tapeColors=['--tape1','--tape2','--tape3','--tape4'];
-function canJoin(s){
-  const r=clips.length?clips[0].src:null;
-  if(!r||r.key===s.key) return true;
-  if(r.kind!==s.kind) say('成品目前是 '+r.kind.toUpperCase()+'，這段是 '+s.kind.toUpperCase()+'。MP3 和 M4A 不能接在同一個成品，請分開匯出。',true);
-  else if(spec(r)===spec(s)) say('這段和成品的編碼設定不同，無法無損接在一起。',true);
-  else say('這段是 '+spec(s)+'，成品是 '+spec(r)+'。規格不同的檔案無法無損接在一起。',true);
-  return false;
-}
 function pushClips(list){
-  if(!canJoin(cur)) return false;
   if(!clips.length&&!nameTouched) $('outName').value=defaultName(cur);
   clips.push(...list); renderClips(); drawOv();
   return true;
@@ -852,19 +791,91 @@ function renderClips(){
   strip.append(el('div',{id:'stripHead',hidden:true}));
   $('noClips').hidden=clips.length>0;
   $('total').textContent=clips.length?clips.length+' 段，共 '+fmt(total):'';
-  $('preview').disabled=$('export').disabled=!clips.length;
+  $('preview').disabled=$('export').disabled=!clips.length||busy;
+  const copy=canCopyFrames(clips), m=$('mode');
+  $('kbpsField').hidden=!clips.length||copy;
+  m.className=clips.length&&!copy?'convert':'';
+  m.textContent=!clips.length?'匯出一律是 MP3。':copy
+    ?'片段都是同規格的 MP3：直接剪接，不重新編碼，音質不變。'
+    :'片段含 M4A 或不同規格的 MP3：匯出時會轉成 MP3，接點加上極短的淡入淡出。';
 }
 function setHighlight(i){
   [...$('clips').children].forEach((li,k)=>li.classList.toggle('now',k===i));
 }
+/* ---------- 轉成 MP3 ---------- */
+const MP3_RATES=[44100,48000,32000,22050,24000,16000,11025,12000,8000];
+const LAME_URL='https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js';
+const decodeAt=(bytes,rate)=>new OfflineAudioContext(1,1,rate).decodeAudioData(bytes.slice().buffer);
+// 把所有片段解碼成同一取樣率的 PCM 接起來，每個接點前後各做 4 毫秒淡入淡出，避免爆音
+async function renderMix(){
+  const srs=[...new Set(clips.map(c=>c.src.sr))];
+  const rate=srs.length===1&&MP3_RATES.includes(srs[0])?srs[0]:44100;
+  const ch=clips.some(c=>c.src.channels>1)?2:1;
+  const bufs=new Map();
+  for(const c of clips) if(!bufs.has(c.src))
+    bufs.set(c.src,c.src.buffer.sampleRate===rate?c.src.buffer:await decodeAt(c.src.decodeData,rate));
+  const parts=clips.map(c=>{
+    const b=bufs.get(c.src), fd=c.src.frameDur, d=c.src.delay;
+    const i0=clamp(Math.round((c.a*fd-d)*rate),0,b.length), i1=clamp(Math.round((c.b*fd-d)*rate),i0,b.length);
+    return {b,i0,i1};
+  });
+  const len=parts.reduce((x,p)=>x+p.i1-p.i0,0);
+  const L=new Float32Array(len), R=ch===2?new Float32Array(len):null, fade=Math.round(rate*.004);
+  let o=0;
+  for(const {b,i0,i1} of parts){
+    const c0=b.getChannelData(0), c1=b.numberOfChannels>1?b.getChannelData(1):c0, n=i1-i0;
+    for(let i=0;i<n;i++,o++){
+      const g=i<fade?i/fade:n-1-i<fade?(n-1-i)/fade:1, l=c0[i0+i]*g, r=c1[i0+i]*g;
+      if(R){L[o]=l;R[o]=r} else L[o]=(l+r)/2;
+    }
+  }
+  return {rate,ch,L,R,len};
+}
+const WORKER=`importScripts('${LAME_URL}');
+onmessage=e=>{
+  const {ch,rate,kbps,L,R}=e.data, enc=new lamejs.Mp3Encoder(ch,rate,kbps), out=[], N=1152*32, len=L.length;
+  const i16=(f,a,b)=>{const o=new Int16Array(b-a);for(let i=a;i<b;i++){const v=f[i]<-1?-1:f[i]>1?1:f[i];o[i-a]=v<0?v*32768:v*32767}return o};
+  const keep=m=>{if(m.length)out.push(new Uint8Array(m.buffer,m.byteOffset,m.length).slice())};
+  for(let i=0,k=0;i<len;i+=N,k++){
+    const b=Math.min(len,i+N);
+    keep(R?enc.encodeBuffer(i16(L,i,b),i16(R,i,b)):enc.encodeBuffer(i16(L,i,b)));
+    if(k%8===0) postMessage({progress:i/len});
+  }
+  keep(enc.flush());
+  postMessage({done:out});
+};`;
+function encodeMp3(m,kbps,onProgress){
+  return new Promise((resolve,reject)=>{
+    const url=URL.createObjectURL(new Blob([WORKER],{type:'text/javascript'})), w=new Worker(url);
+    const end=()=>{w.terminate();URL.revokeObjectURL(url)};
+    w.onmessage=e=>{if(e.data.done){end();resolve(e.data.done)}else onProgress(e.data.progress)};
+    w.onerror=e=>{e.preventDefault();end();reject(new Error('encoder'))};
+    w.postMessage({ch:m.ch,rate:m.rate,kbps:m.rate<32000?Math.min(kbps,160):kbps,L:m.L,R:m.R},m.R?[m.L.buffer,m.R.buffer]:[m.L.buffer]);
+  });
+}
+async function productBuffer(){
+  if(canCopyFrames(clips)){
+    const s0=clips[0].src;
+    return decode(buildExport(clips).bytes,s0.sr,s0.channels,clips.reduce((a,c)=>a+clipTime(c),0));
+  }
+  const m=await renderMix();
+  const buf=new AudioBuffer({length:Math.max(1,m.len),numberOfChannels:m.ch,sampleRate:m.rate});
+  buf.copyToChannel(m.L,0); if(m.R) buf.copyToChannel(m.R,1);
+  return buf;
+}
+function setBusy(v){
+  busy=v;
+  $('export').disabled=$('preview').disabled=v||!clips.length;
+  $('export').textContent=v?'轉檔中…':'匯出 MP3';
+}
+
 async function togglePreview(){
   if(P.mode==='out'){halt();return}
-  if(!clips.length) return;
+  if(!clips.length||busy) return;
   say('正在組合成品…');
-  const r=exportClips(clips), s0=clips[0].src;
   const total=clips.reduce((a,c)=>a+clipTime(c),0);
   let buf;
-  try{buf=await decode(r.bytes,s0.sr,s0.channels,total)}
+  try{buf=await productBuffer()}
   catch(e){say('成品無法解碼，請試著移除最後加入的片段。',true);return}
   const ends=[];let acc=0;for(const c of clips){acc+=clipTime(c);ends.push(acc)}
   say('');
@@ -877,17 +888,29 @@ async function togglePreview(){
 }
 $('preview').onclick=togglePreview;
 $('outName').addEventListener('input',()=>{nameTouched=true});
-$('export').onclick=()=>{
-  if(!clips.length) return;
-  const r=exportClips(clips), ext=extOf(clips[0].src);
-  let name=($('outName').value.trim()||'剪接').replace(/[\\/:*?"<>|]/g,'_');
-  name=name.replace(/\.(mp3|m4a)$/i,'')+ext;
+$('export').onclick=async()=>{
+  if(!clips.length||busy) return;
+  const name=($('outName').value.trim()||'剪接').replace(/[\\/:*?"<>|]/g,'_').replace(/\.(mp3|m4a)$/i,'')+'.mp3';
   $('outName').value=name;
-  const url=URL.createObjectURL(new Blob([r.bytes],{type:ext==='.m4a'?'audio/mp4':'audio/mpeg'}));
+  const total=clips.reduce((x,c)=>x+clipTime(c),0), copy=canCopyFrames(clips);
+  let parts;
+  if(copy) parts=[buildExport(clips).bytes];
+  else{
+    halt(); setBusy(true);
+    try{
+      say('正在解碼片段…');
+      const m=await renderMix();
+      say('正在轉成 MP3… 0%');
+      parts=await encodeMp3(m,+$('kbps').value,p=>say('正在轉成 MP3… '+Math.round(p*100)+'%'));
+    }catch(e){
+      say(e.message==='encoder'?'轉檔失敗：MP3 編碼器要連上網路才能載入，請確認網路後再試一次。':'轉檔失敗：有片段無法解碼，請移除最後加入的片段再試。',true);
+      return;
+    }finally{setBusy(false)}
+  }
+  const blob=new Blob(parts,{type:'audio/mpeg'}), url=URL.createObjectURL(blob);
   const a=el('a',{href:url,download:name}); document.body.append(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url),60000);
-  const total=clips.reduce((x,c)=>x+clipTime(c),0);
-  say('已匯出「'+name+'」，'+fmt(total)+'，'+mb(r.bytes.length)+'。');
+  say('已匯出「'+name+'」，'+fmt(total)+'，'+mb(blob.size)+(copy?'，未重新編碼。':'，已轉成 '+$('kbps').value+' kbps MP3。'));
 };
 
 /* ---------- 全域事件 ---------- */
