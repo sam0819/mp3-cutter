@@ -761,6 +761,11 @@ function moveClip(from,to){
   const [c]=clips.splice(from,1); clips.splice(to,0,c); renderClips();
 }
 const clipTime=c=>(c.b-c.a)*c.src.frameDur;
+function copyClip(i){
+  const c=clips[i];
+  clips.splice(i+1,0,{...c,id:++clipSeq}); renderClips(); drawOv();
+  say('已複製第 '+(i+1)+' 段（'+fmt(clipTime(c))+'），放在第 '+(i+2)+' 段。');
+}
 function renderClips(){
   if(P.mode==='out') halt();
   const list=$('clips'), strip=$('strip'); list.replaceChildren(); strip.replaceChildren();
@@ -780,6 +785,7 @@ function renderClips(){
       el('span',{className:'ops'},
         el('button',{textContent:'↑',title:'往前',disabled:i===0,onclick:()=>moveClip(i,i-1)}),
         el('button',{textContent:'↓',title:'往後',disabled:i===clips.length-1,onclick:()=>moveClip(i,i+1)}),
+        el('button',{textContent:'複製',title:'複製這段，接在它後面',onclick:()=>copyClip(i)}),
         el('button',{textContent:'✕',title:'移除',onclick:()=>{clips.splice(i,1);renderClips();drawOv()}})));
     li.addEventListener('dragstart',()=>{dragClip=i});
     li.addEventListener('dragend',()=>{dragClip=-1});
@@ -941,6 +947,13 @@ addEventListener('keydown',e=>{
     followHead();
   }
 });
+// 桌面版（exe）用：定時告訴本機伺服器視窗還開著，視窗全部關掉後程式就自己結束
+if(location.hostname==='127.0.0.1') fetch('/ping').then(r=>r.ok?r.text():'').then(t=>{
+  if(t!=='mp3cutter') return;
+  const id=Math.random().toString(36).slice(2), beat=()=>fetch('/alive?id='+id,{cache:'no-store'}).catch(()=>{});
+  beat(); setInterval(beat,3000);
+  addEventListener('pagehide',()=>navigator.sendBeacon('/bye?id='+id));
+}).catch(()=>{});
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{readTokens();drawWave();drawOv()});
 readTokens();
 new ResizeObserver(fitCanvas).observe(stage);
